@@ -31,8 +31,18 @@ const BinOp = struct {
 };
 
 const Number = union(enum) {
-    int: i64,
+    // int: i64,
     float: f64,
+    fn toStr(n: Number) []const u8 {
+        const defc: []u8 = @constCast("#");
+        var buff: []u8 = alloc.alloc(u8, 40) catch defc;
+        switch (n) {
+            inline else => |val| {
+                buff = std.fmt.bufPrint(buff, "{d}", .{val}) catch defc;
+            },
+        }
+        return buff;
+    }
 };
 
 const Token = union(enum) {
@@ -45,22 +55,22 @@ const Token = union(enum) {
         var buff: []u8 = alloc.alloc(u8, 40) catch defc;
         switch (self) {
             .number => |number| {
-                switch (number) {
-                    inline else => |val| {
-                        buff = std.fmt.bufPrint(buff, "{}", .{val}) catch defc;
-                    },
-                }
+                return number.toStr();
             },
-            .bin_op => |op| {
-                const c: u8 = switch (op.kind) {
-                    .mul => '*',
-                    .add => '+',
-                    .sub => '-',
-                    .div => '/',
+            .bin_op, .l_parens, .r_parens => {
+                const c: u8 = switch (self) {
+                    .bin_op => |op| switch (op.kind) {
+                        .mul => '*',
+                        .add => '+',
+                        .sub => '-',
+                        .div => '/',
+                    },
+                    .l_parens => '(',
+                    .r_parens => ')',
+                    else => unreachable,
                 };
                 buff = std.fmt.bufPrint(buff, "{c}", .{c}) catch defc;
             },
-            else => return defc,
         }
         return buff;
     }
@@ -79,7 +89,7 @@ fn shuntingYard(tokens: []Token) ![]Token {
         switch (token) {
             .number => {
                 if (!(exp_tok == .any or exp_tok == .number_or_lp)) {
-                    std.log.err("Unexpected token: {}", .{token});
+                    std.log.err("Unexpected token: `{s}`", .{token.toStr()});
                     return error.UnexpectedToken;
                 }
                 output_queue.appendAssumeCapacity(token);
@@ -87,7 +97,7 @@ fn shuntingYard(tokens: []Token) ![]Token {
             },
             .l_parens => {
                 if (!(exp_tok == .any or exp_tok == .number_or_lp)) {
-                    std.log.err("Unexpected token: {}", .{token});
+                    std.log.err("Unexpected token: `{s}`", .{token.toStr()});
                     return error.UnexpectedToken;
                 }
                 operator_stack.appendAssumeCapacity(token);
@@ -95,7 +105,7 @@ fn shuntingYard(tokens: []Token) ![]Token {
             },
             .bin_op => |op| {
                 if (!(exp_tok == .any or exp_tok == .operand_or_rp)) {
-                    std.log.err("Unexpected token: {}", .{token});
+                    std.log.err("Unexpected token: `{s}`", .{token.toStr()});
                     return error.UnexpectedToken;
                 }
                 exp_tok = .number_or_lp;
@@ -117,7 +127,7 @@ fn shuntingYard(tokens: []Token) ![]Token {
             },
             .r_parens => {
                 if (!(exp_tok == .any or exp_tok == .operand_or_rp)) {
-                    std.log.err("Unexpected token: {}", .{token});
+                    std.log.err("Unexpected token: `{s}`", .{token.toStr()});
                     return error.UnexpectedToken;
                 }
                 exp_tok = .operand_or_rp;
@@ -200,17 +210,17 @@ fn lexLine(line: []u8) ![]Token {
                     }
                 }
                 if (has_dot) {
-                    const number = std.fmt.parseFloat(f32, nbuff[0..i]) catch {
+                    const number = std.fmt.parseFloat(f64, nbuff[0..i]) catch {
                         std.log.err("Expected digit but got {s}", .{nbuff[0..i]});
                         return error.LexingError;
                     };
                     try tokens.append(Token{ .number = .{ .float = number } });
                 } else {
-                    const number = std.fmt.parseInt(i64, nbuff[0..i], 10) catch {
+                    const number = std.fmt.parseFloat(f64, nbuff[0..i]) catch {
                         std.log.err("Expected digit but got {s}", .{nbuff[0..i]});
                         return error.LexingError;
                     };
-                    try tokens.append(Token{ .number = .{ .int = number } });
+                    try tokens.append(Token{ .number = .{ .float = number } });
                 }
                 str = str[i..];
             },
@@ -225,6 +235,27 @@ fn lexLine(line: []u8) ![]Token {
     return tokens.items;
 }
 
+fn eval(tokens: []Token) Number {
+    var stack = std.ArrayList(Number).initCapacity(alloc, 256) catch unreachable;
+    for (tokens) |token| {
+        switch (token) {
+            .number => |number| stack.appendAssumeCapacity(number),
+            .bin_op => |op| {
+                const r = stack.pop().float;
+                const l = stack.pop().float;
+                const result = switch (op.kind) {
+                    .add => r + l,
+                    .sub => r - l,
+                    .mul => r * l,
+                    .div => r / l,
+                };
+                stack.appendAssumeCapacity(Number{ .float = result });
+            },
+            else => unreachable,
+        }
+    }
+    return stack.pop();
+}
 var arena: std.heap.ArenaAllocator = undefined;
 var alloc: Allocator = undefined;
 
@@ -235,7 +266,7 @@ pub fn main() !u8 {
 
     var line_buff: [BUFFER_LENGTH]u8 = undefined; //[_]u8{0} ** 1024;
 
-    repl_loop: while (true) {
+    repl_loop: while (true) : (_ = arena.reset(.retain_capacity)) {
         try wout.print("calcu>", .{});
         const n: usize = try stdin.read(&line_buff);
         const sv = line_buff[0..(n - 1)]; // Trimmed newline
@@ -247,12 +278,9 @@ pub fn main() !u8 {
             }
             continue :repl_loop;
         };
-        const rp_tokens = try shuntingYard(tokens);
-        for (rp_tokens) |tk| {
-            try wout.print("{s} ", .{tk.toStr()});
-        }
-        _ = try wout.write("\n");
-        _ = arena.reset(.retain_capacity);
+        const rp_tokens = shuntingYard(tokens) catch continue :repl_loop;
+        const res = eval(rp_tokens);
+        try wout.print("{s}\n", .{res.toStr()});
     }
     return 0;
 }
